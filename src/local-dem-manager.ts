@@ -3,6 +3,7 @@ import defaultDecodeImage from "./decode-image";
 import { HeightTile } from "./height-tile";
 import generateIsolines from "./isolines";
 import { encodeIndividualOptions, isAborted, withTimeout } from "./utils";
+import { PMTiles, FetchSource } from "pmtiles";
 import type {
   ContourTile,
   DecodeImageFunction,
