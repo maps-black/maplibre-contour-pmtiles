@@ -414,14 +414,16 @@ function encodeIndividualOptions(options) {
 function getOptionsForZoom(options, zoom) {
     const { thresholds } = options, rest = __rest(options, ["thresholds"]);
     let levels = [];
-    let maxLessThanOrEqualTo = -Infinity;
-    Object.entries(thresholds).forEach(([zString, value]) => {
-        const z = Number(zString);
-        if (z <= zoom && z > maxLessThanOrEqualTo) {
-            maxLessThanOrEqualTo = z;
-            levels = typeof value === "number" ? [value] : value;
-        }
-    });
+    if (thresholds) {
+        let maxLessThanOrEqualTo = -Infinity;
+        Object.entries(thresholds).forEach(([zString, value]) => {
+            const z = Number(zString);
+            if (z <= zoom && z > maxLessThanOrEqualTo) {
+                maxLessThanOrEqualTo = z;
+                levels = typeof value === "number" ? [value] : value;
+            }
+        });
+    }
     return Object.assign({ levels }, rest);
 }
 function copy(src) {
@@ -577,279 +579,6 @@ class AsyncCache {
                 this.items.delete(minKey);
             }
         }
-    }
-}
-
-let offscreenCanvas;
-let offscreenContext;
-let canvas;
-let canvasContext;
-/**
- * Parses a `raster-dem` image into a DemTile using Webcoded VideoFrame API.
- */
-function decodeImageModern(blob, encoding, abortController) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const img = yield createImageBitmap(blob);
-        if (isAborted(abortController))
-            return null;
-        return decodeImageUsingOffscreenCanvas(img, encoding);
-    });
-}
-function decodeImageUsingOffscreenCanvas(img, encoding) {
-    if (!offscreenCanvas) {
-        offscreenCanvas = new OffscreenCanvas(img.width, img.height);
-        offscreenContext = offscreenCanvas.getContext("2d", {
-            willReadFrequently: true,
-        });
-    }
-    return getElevations(img, encoding, offscreenCanvas, offscreenContext);
-}
-/**
- * Parses a `raster-dem` image into a DemTile using webcodec VideoFrame API which works
- * even when browsers disable/degrade the canvas getImageData API as a privacy protection.
- */
-function decodeImageVideoFrame(blob, encoding, abortController) {
-    return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c;
-        const img = yield createImageBitmap(blob);
-        if (isAborted(abortController))
-            return null;
-        const vf = new VideoFrame(img, { timestamp: 0 });
-        try {
-            // formats we can handle: BGRX, BGRA, RGBA, RGBX
-            const valid = ((_a = vf === null || vf === void 0 ? void 0 : vf.format) === null || _a === void 0 ? void 0 : _a.startsWith("BGR")) || ((_b = vf === null || vf === void 0 ? void 0 : vf.format) === null || _b === void 0 ? void 0 : _b.startsWith("RGB"));
-            if (!valid) {
-                throw new Error(`Unrecognized format: ${vf === null || vf === void 0 ? void 0 : vf.format}`);
-            }
-            const swapBR = (_c = vf === null || vf === void 0 ? void 0 : vf.format) === null || _c === void 0 ? void 0 : _c.startsWith("BGR");
-            const size = vf.allocationSize();
-            const data = new Uint8ClampedArray(size);
-            yield vf.copyTo(data);
-            if (swapBR) {
-                for (let i = 0; i < data.length; i += 4) {
-                    const tmp = data[i];
-                    data[i] = data[i + 2];
-                    data[i + 2] = tmp;
-                }
-            }
-            return decodeParsedImage(img.width, img.height, encoding, data);
-        }
-        catch (_) {
-            if (isAborted(abortController))
-                return null;
-            // fall back to offscreen canvas
-            return decodeImageUsingOffscreenCanvas(img, encoding);
-        }
-        finally {
-            vf.close();
-        }
-    });
-}
-/**
- * Parses a `raster-dem` image into a DemTile using `<img>` element drawn to a `<canvas>`.
- * Only works on the main thread, but works across all browsers.
- */
-function decodeImageOld(blob, encoding, abortController) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!canvas) {
-            canvas = document.createElement("canvas");
-            canvasContext = canvas.getContext("2d", {
-                willReadFrequently: true,
-            });
-        }
-        const img = new Image();
-        onAbort(abortController, () => (img.src = ""));
-        const fetchedImage = yield new Promise((resolve, reject) => {
-            img.onload = () => {
-                if (!isAborted(abortController))
-                    resolve(img);
-                URL.revokeObjectURL(img.src);
-                img.onload = null;
-            };
-            img.onerror = () => reject(new Error("Could not load image."));
-            img.src = blob.size ? URL.createObjectURL(blob) : "";
-        });
-        return getElevations(fetchedImage, encoding, canvas, canvasContext);
-    });
-}
-/**
- * Parses a `raster-dem` image in a worker that doesn't support OffscreenCanvas and createImageBitmap
- * by running decodeImageOld on the main thread and returning the result.
- */
-function decodeImageOnMainThread(blob, encoding, abortController) {
-    return self.actor.send("decodeImage", [], abortController, undefined, blob, encoding);
-}
-function isWorker() {
-    return (
-    // @ts-expect-error WorkerGlobalScope defined
-    typeof WorkerGlobalScope !== "undefined" &&
-        typeof self !== "undefined" &&
-        // @ts-expect-error WorkerGlobalScope defined
-        self instanceof WorkerGlobalScope);
-}
-const defaultDecoder = shouldUseVideoFrame()
-    ? decodeImageVideoFrame
-    : offscreenCanvasSupported()
-        ? decodeImageModern
-        : isWorker()
-            ? decodeImageOnMainThread
-            : decodeImageOld;
-function getElevations(img, encoding, canvas, canvasContext) {
-    canvas.width = img.width;
-    canvas.height = img.height;
-    if (!canvasContext)
-        throw new Error("failed to get context");
-    canvasContext.drawImage(img, 0, 0, img.width, img.height);
-    const rgba = canvasContext.getImageData(0, 0, img.width, img.height).data;
-    return decodeParsedImage(img.width, img.height, encoding, rgba);
-}
-function decodeParsedImage(width, height, encoding, input) {
-    const decoder = encoding === "mapbox"
-        ? (r, g, b) => -10000 + (r * 256 * 256 + g * 256 + b) * 0.1
-        : (r, g, b) => r * 256 + g + b / 256 - 32768;
-    const data = new Float32Array(width * height);
-    for (let i = 0; i < input.length; i += 4) {
-        data[i / 4] = decoder(input[i], input[i + 1], input[i + 2]);
-    }
-    return { width, height, data };
-}
-
-const MIN_VALID_M = -12000;
-const MAX_VALID_M = 9000;
-function defaultIsValid(number) {
-    return !isNaN(number) && number >= MIN_VALID_M && number <= MAX_VALID_M;
-}
-/** A tile containing elevation values aligned to a grid. */
-class HeightTile {
-    constructor(width, height, get) {
-        /**
-         * Splits this tile into a `1<<subz` x `1<<subz` grid and returns the tile at coordinates `subx, suby`.
-         */
-        this.split = (subz, subx, suby) => {
-            if (subz === 0)
-                return this;
-            const by = 1 << subz;
-            const dx = (subx * this.width) / by;
-            const dy = (suby * this.height) / by;
-            return new HeightTile(this.width / by, this.height / by, (x, y) => this.get(x + dx, y + dy));
-        };
-        /**
-         * Returns a new tile scaled up by `factor` with pixel values that are subsampled using
-         * bilinear interpolation between the original height tile values.
-         *
-         * The original and result tile are assumed to represent values taken at the center of each pixel.
-         */
-        this.subsamplePixelCenters = (factor) => {
-            const lerp = (a, b, f) => isNaN(a) ? b : isNaN(b) ? a : a + (b - a) * f;
-            if (factor <= 1)
-                return this;
-            const sub = 0.5 - 1 / (2 * factor);
-            const blerper = (x, y) => {
-                const dx = x / factor - sub;
-                const dy = y / factor - sub;
-                const ox = Math.floor(dx);
-                const oy = Math.floor(dy);
-                const a = this.get(ox, oy);
-                const b = this.get(ox + 1, oy);
-                const c = this.get(ox, oy + 1);
-                const d = this.get(ox + 1, oy + 1);
-                const fx = dx - ox;
-                const fy = dy - oy;
-                const top = lerp(a, b, fx);
-                const bottom = lerp(c, d, fx);
-                return lerp(top, bottom, fy);
-            };
-            return new HeightTile(this.width * factor, this.height * factor, blerper);
-        };
-        /**
-         * Assumes the input tile represented measurements taken at the center of each pixel, and
-         * returns a new tile where values are the height at the top-left of each pixel by averaging
-         * the 4 adjacent pixel values.
-         */
-        this.averagePixelCentersToGrid = (radius = 1) => new HeightTile(this.width + 1, this.height + 1, (x, y) => {
-            let sum = 0, count = 0, v = 0;
-            for (let newX = x - radius; newX < x + radius; newX++) {
-                for (let newY = y - radius; newY < y + radius; newY++) {
-                    if (!isNaN((v = this.get(newX, newY)))) {
-                        count++;
-                        sum += v;
-                    }
-                }
-            }
-            return count === 0 ? NaN : sum / count;
-        });
-        /** Returns a new tile with elevation values scaled by `multiplier`. */
-        this.scaleElevation = (multiplier) => multiplier === 1
-            ? this
-            : new HeightTile(this.width, this.height, (x, y) => this.get(x, y) * multiplier);
-        /**
-         * Precompute every value from `-bufer, -buffer` to `width + buffer, height + buffer` and serve them
-         * out of a `Float32Array`. Until this method is called, all `get` requests are lazy and call all previous
-         * methods in the chain up to the root DEM tile.
-         */
-        this.materialize = (buffer = 2) => {
-            const stride = this.width + 2 * buffer;
-            const data = new Float32Array(stride * (this.height + 2 * buffer));
-            let idx = 0;
-            for (let y = -buffer; y < this.height + buffer; y++) {
-                for (let x = -buffer; x < this.width + buffer; x++) {
-                    data[idx++] = this.get(x, y);
-                }
-            }
-            return new HeightTile(this.width, this.height, (x, y) => data[(y + buffer) * stride + x + buffer]);
-        };
-        this.get = get;
-        this.width = width;
-        this.height = height;
-    }
-    /** Construct a height tile from raw DEM pixel values */
-    static fromRawDem(demTile) {
-        return new HeightTile(demTile.width, demTile.height, (x, y) => {
-            const value = demTile.data[y * demTile.width + x];
-            return defaultIsValid(value) ? value : NaN;
-        });
-    }
-    /**
-     * Construct a height tile from a DEM tile plus it's 8 neighbors, so that
-     * you can request `x` or `y` outside the bounds of the original tile.
-     *
-     * @param neighbors An array containing tiles: `[nw, n, ne, w, c, e, sw, s, se]`
-     */
-    static combineNeighbors(neighbors) {
-        if (neighbors.length !== 9) {
-            throw new Error("Must include a tile plus 8 neighbors");
-        }
-        const mainTile = neighbors[4];
-        if (!mainTile) {
-            return undefined;
-        }
-        const width = mainTile.width;
-        const height = mainTile.height;
-        return new HeightTile(width, height, (x, y) => {
-            let gridIdx = 0;
-            if (y < 0) {
-                y += height;
-            }
-            else if (y < height) {
-                gridIdx += 3;
-            }
-            else {
-                y -= height;
-                gridIdx += 6;
-            }
-            if (x < 0) {
-                x += width;
-            }
-            else if (x < width) {
-                gridIdx += 1;
-            }
-            else {
-                x -= width;
-                gridIdx += 2;
-            }
-            const grid = neighbors[gridIdx];
-            return grid ? grid.get(x, y) : NaN;
-        });
     }
 }
 
@@ -1230,7 +959,7 @@ var gzl = function (d) {
 var zls = function (d, dict) {
     if ((d[0] & 15) != 8 || (d[0] >> 4) > 7 || ((d[0] << 8 | d[1]) % 31))
         err(6, 'invalid zlib data');
-    if ((d[1] >> 5 & 1) == +!dict)
+    if ((d[1] >> 5 & 1) == 1)
         err(6, 'invalid zlib data: ' + (d[1] & 32 ? 'need' : 'unexpected') + ' dictionary');
     return (d[1] >> 3 & 4) + 2;
 };
@@ -1262,7 +991,7 @@ function gunzipSync(data, opts) {
  * @returns The decompressed version of the data
  */
 function unzlibSync(data, opts) {
-    return inflt(data.subarray(zls(data, opts), -4), { i: 2 }, opts, opts);
+    return inflt(data.subarray(zls(data), -4), { i: 2 }, opts, opts);
 }
 /**
  * Expands compressed GZIP, Zlib, or raw DEFLATE data, automatically detecting the format
@@ -1287,7 +1016,342 @@ try {
 }
 catch (e) { }
 
-var z=Object.defineProperty;var b=Math.pow;var l=(i,e)=>z(i,"name",{value:e,configurable:!0});var m=(i,e,t)=>new Promise((r,n)=>{var s=u=>{try{a(t.next(u));}catch(c){n(c);}},o=u=>{try{a(t.throw(u));}catch(c){n(c);}},a=u=>u.done?r(u.value):Promise.resolve(u.value).then(s,o);a((t=t.apply(i,e)).next());});l((i,e)=>{let t=!1,r="",n=L.GridLayer.extend({createTile:l((s,o)=>{let a=document.createElement("img"),u=new AbortController,c=u.signal;return a.cancel=()=>{u.abort();},t||(i.getHeader().then(d=>{d.tileType===1?console.error("Error: archive contains MVT vector tiles, but leafletRasterLayer is for displaying raster tiles. See https://github.com/protomaps/PMTiles/tree/main/js for details."):d.tileType===2?r="image/png":d.tileType===3?r="image/jpeg":d.tileType===4?r="image/webp":d.tileType===5&&(r="image/avif");}),t=!0),i.getZxy(s.z,s.x,s.y,c).then(d=>{if(d){let h=new Blob([d.data],{type:r}),g=window.URL.createObjectURL(h);a.src=g,a.cancel=void 0,o(void 0,a);}}).catch(d=>{if(d.name!=="AbortError")throw d}),a},"createTile"),_removeTile:l(function(s){let o=this._tiles[s];o&&(o.el.cancel&&o.el.cancel(),o.el.width=0,o.el.height=0,o.el.deleted=!0,L.DomUtil.remove(o.el),delete this._tiles[s],this.fire("tileunload",{tile:o.el,coords:this._keyToTileCoords(s)}));},"_removeTile")});return new n(e)},"leafletRasterLayer");var j=l(i=>(e,t)=>{if(t instanceof AbortController)return i(e,t);let r=new AbortController;return i(e,r).then(n=>t(void 0,n.data,n.cacheControl||"",n.expires||""),n=>t(n)).catch(n=>t(n)),{cancel:l(()=>r.abort(),"cancel")}},"v3compat"),T=class T{constructor(e){this.tilev4=l((e,t)=>m(this,null,function*(){if(e.type==="json"){let g=e.url.substr(10),p=this.tiles.get(g);if(p||(p=new x(g),this.tiles.set(g,p)),this.metadata)return {data:yield p.getTileJson(e.url)};let y=yield p.getHeader();return {data:{tiles:[`${e.url}/{z}/{x}/{y}`],minzoom:y.minZoom,maxzoom:y.maxZoom,bounds:[y.minLon,y.minLat,y.maxLon,y.maxLat]}}}let r=new RegExp(/pmtiles:\/\/(.+)\/(\d+)\/(\d+)\/(\d+)/),n=e.url.match(r);if(!n)throw new Error("Invalid PMTiles protocol URL");let s=n[1],o=this.tiles.get(s);o||(o=new x(s),this.tiles.set(s,o));let a=n[2],u=n[3],c=n[4],d=yield o.getHeader(),h=yield o==null?void 0:o.getZxy(+a,+u,+c,t.signal);if(h)return {data:new Uint8Array(h.data),cacheControl:h.cacheControl,expires:h.expires};if(d.tileType===1){if(this.errorOnMissingTile)throw new Error("Tile not found.");return {data:new Uint8Array}}return {data:null}}),"tilev4");this.tile=j(this.tilev4);this.tiles=new Map,this.metadata=(e==null?void 0:e.metadata)||!1,this.errorOnMissingTile=(e==null?void 0:e.errorOnMissingTile)||!1;}add(e){this.tiles.set(e.source.getKey(),e);}get(e){return this.tiles.get(e)}};l(T,"Protocol");function w(i,e){return (e>>>0)*4294967296+(i>>>0)}l(w,"toNum");function F(i,e){let t=e.buf,r=t[e.pos++],n=(r&112)>>4;if(r<128||(r=t[e.pos++],n|=(r&127)<<3,r<128)||(r=t[e.pos++],n|=(r&127)<<10,r<128)||(r=t[e.pos++],n|=(r&127)<<17,r<128)||(r=t[e.pos++],n|=(r&127)<<24,r<128)||(r=t[e.pos++],n|=(r&1)<<31,r<128))return w(i,n);throw new Error("Expected varint not more than 10 bytes")}l(F,"readVarintRemainder");function v(i){let e=i.buf,t=e[i.pos++],r=t&127;return t<128||(t=e[i.pos++],r|=(t&127)<<7,t<128)||(t=e[i.pos++],r|=(t&127)<<14,t<128)||(t=e[i.pos++],r|=(t&127)<<21,t<128)?r:(t=e[i.pos],r|=(t&15)<<28,F(r,i))}l(v,"readVarint");function Z(i,e,t,r){if(r===0){t===1&&(e[0]=i-1-e[0],e[1]=i-1-e[1]);let n=e[0];e[0]=e[1],e[1]=n;}}l(Z,"rotate");function N(i,e){let t=b(2,i),r=e,n=e,s=e,o=[0,0],a=1;for(;a<t;)r=1&s/2,n=1&(s^r),Z(a,o,r,n),o[0]+=a*r,o[1]+=a*n,s=s/4,a*=2;return [i,o[0],o[1]]}l(N,"idOnLevel");var q=[0,1,5,21,85,341,1365,5461,21845,87381,349525,1398101,5592405,22369621,89478485,357913941,1431655765,5726623061,22906492245,91625968981,366503875925,1466015503701,5864062014805,23456248059221,93824992236885,375299968947541,0x5555555555555];function G(i,e,t){if(i>26)throw new Error("Tile zoom level exceeds max safe number limit (26)");if(e>b(2,i)-1||t>b(2,i)-1)throw new Error("tile x/y outside zoom level bounds");let r=q[i],n=b(2,i),s=0,o=0,a=0,u=[e,t],c=n/2;for(;c>0;)s=(u[0]&c)>0?1:0,o=(u[1]&c)>0?1:0,a+=c*c*(3*s^o),Z(c,u,s,o),c=c/2;return r+a}l(G,"zxyToTileId");function ie(i){let e=0;for(let r=0;r<27;r++){let n=(1<<r)*(1<<r);if(e+n>i)return N(r,i-e);e+=n;}throw new Error("Tile zoom level exceeds max safe number limit (26)")}l(ie,"tileIdToZxy");var J=(s=>(s[s.Unknown=0]="Unknown",s[s.None=1]="None",s[s.Gzip=2]="Gzip",s[s.Brotli=3]="Brotli",s[s.Zstd=4]="Zstd",s))(J||{});function D(i,e){return m(this,null,function*(){if(e===1||e===0)return i;if(e===2){if(typeof globalThis.DecompressionStream=="undefined")return decompressSync(new Uint8Array(i));let t=new Response(i).body;if(!t)throw new Error("Failed to read response stream");let r=t.pipeThrough(new globalThis.DecompressionStream("gzip"));return new Response(r).arrayBuffer()}throw new Error("Compression method not supported")})}l(D,"defaultDecompress");var O=(o=>(o[o.Unknown=0]="Unknown",o[o.Mvt=1]="Mvt",o[o.Png=2]="Png",o[o.Jpeg=3]="Jpeg",o[o.Webp=4]="Webp",o[o.Avif=5]="Avif",o))(O||{});function _(i){return i===1?".mvt":i===2?".png":i===3?".jpg":i===4?".webp":i===5?".avif":""}l(_,"tileTypeExt");var Y=127;function Q(i,e){let t=0,r=i.length-1;for(;t<=r;){let n=r+t>>1,s=e-i[n].tileId;if(s>0)t=n+1;else if(s<0)r=n-1;else return i[n]}return r>=0&&(i[r].runLength===0||e-i[r].tileId<i[r].runLength)?i[r]:null}l(Q,"findTile");var A=class A{constructor(e){this.file=e;}getKey(){return this.file.name}getBytes(e,t){return m(this,null,function*(){return {data:yield this.file.slice(e,e+t).arrayBuffer()}})}};l(A,"FileSource");var U=class U{constructor(e,t=new Headers){this.url=e,this.customHeaders=t,this.mustReload=!1;let r="";"navigator"in globalThis&&(r=globalThis.navigator.userAgent||"");let n=r.indexOf("Windows")>-1,s=/Chrome|Chromium|Edg|OPR|Brave/.test(r);this.chromeWindowsNoCache=!1,n&&s&&(this.chromeWindowsNoCache=!0);}getKey(){return this.url}setHeaders(e){this.customHeaders=e;}getBytes(e,t,r,n){return m(this,null,function*(){let s,o;r?o=r:(s=new AbortController,o=s.signal);let a=new Headers(this.customHeaders);a.set("range",`bytes=${e}-${e+t-1}`);let u;this.mustReload?u="reload":this.chromeWindowsNoCache&&(u="no-store");let c=yield fetch(this.url,{signal:o,cache:u,headers:a});if(e===0&&c.status===416){let p=c.headers.get("Content-Range");if(!p||!p.startsWith("bytes */"))throw new Error("Missing content-length on 416 response");let y=+p.substr(8);c=yield fetch(this.url,{signal:o,cache:"reload",headers:{range:`bytes=0-${y-1}`}});}let d=c.headers.get("Etag");if(d!=null&&d.startsWith("W/")&&(d=null),c.status===416||n&&d&&d!==n)throw this.mustReload=!0,new E(`Server returned non-matching ETag ${n} after one retry. Check browser extensions and servers for issues that may affect correct ETag headers.`);if(c.status>=300)throw new Error(`Bad response code: ${c.status}`);let h=c.headers.get("Content-Length");if(c.status===200&&(!h||+h>t))throw s&&s.abort(),new Error("Server returned no content-length header or content-length exceeding request. Check that your storage backend supports HTTP Byte Serving.");return {data:yield c.arrayBuffer(),etag:d||void 0,cacheControl:c.headers.get("Cache-Control")||void 0,expires:c.headers.get("Expires")||void 0}})}};l(U,"FetchSource");var C=U;function f(i,e){let t=i.getUint32(e+4,!0),r=i.getUint32(e+0,!0);return t*b(2,32)+r}l(f,"getUint64");function X(i,e){let t=new DataView(i),r=t.getUint8(7);if(r>3)throw new Error(`Archive is spec version ${r} but this library supports up to spec version 3`);return {specVersion:r,rootDirectoryOffset:f(t,8),rootDirectoryLength:f(t,16),jsonMetadataOffset:f(t,24),jsonMetadataLength:f(t,32),leafDirectoryOffset:f(t,40),leafDirectoryLength:f(t,48),tileDataOffset:f(t,56),tileDataLength:f(t,64),numAddressedTiles:f(t,72),numTileEntries:f(t,80),numTileContents:f(t,88),clustered:t.getUint8(96)===1,internalCompression:t.getUint8(97),tileCompression:t.getUint8(98),tileType:t.getUint8(99),minZoom:t.getUint8(100),maxZoom:t.getUint8(101),minLon:t.getInt32(102,!0)/1e7,minLat:t.getInt32(106,!0)/1e7,maxLon:t.getInt32(110,!0)/1e7,maxLat:t.getInt32(114,!0)/1e7,centerZoom:t.getUint8(118),centerLon:t.getInt32(119,!0)/1e7,centerLat:t.getInt32(123,!0)/1e7,etag:e}}l(X,"bytesToHeader");function $(i){let e={buf:new Uint8Array(i),pos:0},t=v(e),r=[],n=0;for(let s=0;s<t;s++){let o=v(e);r.push({tileId:n+o,offset:0,length:0,runLength:1}),n+=o;}for(let s=0;s<t;s++)r[s].runLength=v(e);for(let s=0;s<t;s++)r[s].length=v(e);for(let s=0;s<t;s++){let o=v(e);o===0&&s>0?r[s].offset=r[s-1].offset+r[s-1].length:r[s].offset=o-1;}return r}l($,"deserializeIndex");var R=class R extends Error{};l(R,"EtagMismatch");var E=R;function K(i,e){return m(this,null,function*(){let t=yield i.getBytes(0,16384);if(new DataView(t.data).getUint16(0,!0)!==19792)throw new Error("Wrong magic number for PMTiles archive");let n=t.data.slice(0,Y),s=X(n,t.etag),o=t.data.slice(s.rootDirectoryOffset,s.rootDirectoryOffset+s.rootDirectoryLength),a=`${i.getKey()}|${s.etag||""}|${s.rootDirectoryOffset}|${s.rootDirectoryLength}`,u=$(yield e(o,s.internalCompression));return [s,[a,u.length,u]]})}l(K,"getHeaderAndRoot");function I(i,e,t,r,n){return m(this,null,function*(){let s=yield i.getBytes(t,r,void 0,n.etag),o=yield e(s.data,n.internalCompression),a=$(o);if(a.length===0)throw new Error("Empty directory is invalid");return a})}l(I,"getDirectory");var H=class H{constructor(e=100,t=!0,r=D){this.cache=new Map,this.maxCacheEntries=e,this.counter=1,this.decompress=r;}getHeader(e){return m(this,null,function*(){let t=e.getKey(),r=this.cache.get(t);if(r)return r.lastUsed=this.counter++,r.data;let n=yield K(e,this.decompress);return n[1]&&this.cache.set(n[1][0],{lastUsed:this.counter++,data:n[1][2]}),this.cache.set(t,{lastUsed:this.counter++,data:n[0]}),this.prune(),n[0]})}getDirectory(e,t,r,n){return m(this,null,function*(){let s=`${e.getKey()}|${n.etag||""}|${t}|${r}`,o=this.cache.get(s);if(o)return o.lastUsed=this.counter++,o.data;let a=yield I(e,this.decompress,t,r,n);return this.cache.set(s,{lastUsed:this.counter++,data:a}),this.prune(),a})}prune(){if(this.cache.size>this.maxCacheEntries){let e=1/0,t;this.cache.forEach((r,n)=>{r.lastUsed<e&&(e=r.lastUsed,t=n);}),t&&this.cache.delete(t);}}invalidate(e){return m(this,null,function*(){this.cache.delete(e.getKey());})}};l(H,"ResolvedValueCache");var M=class M{constructor(e=100,t=!0,r=D){this.cache=new Map,this.invalidations=new Map,this.maxCacheEntries=e,this.counter=1,this.decompress=r;}getHeader(e){return m(this,null,function*(){let t=e.getKey(),r=this.cache.get(t);if(r)return r.lastUsed=this.counter++,yield r.data;let n=new Promise((s,o)=>{K(e,this.decompress).then(a=>{a[1]&&this.cache.set(a[1][0],{lastUsed:this.counter++,data:Promise.resolve(a[1][2])}),s(a[0]),this.prune();}).catch(a=>{o(a);});});return this.cache.set(t,{lastUsed:this.counter++,data:n}),n})}getDirectory(e,t,r,n){return m(this,null,function*(){let s=`${e.getKey()}|${n.etag||""}|${t}|${r}`,o=this.cache.get(s);if(o)return o.lastUsed=this.counter++,yield o.data;let a=new Promise((u,c)=>{I(e,this.decompress,t,r,n).then(d=>{u(d),this.prune();}).catch(d=>{c(d);});});return this.cache.set(s,{lastUsed:this.counter++,data:a}),a})}prune(){if(this.cache.size>=this.maxCacheEntries){let e=1/0,t;this.cache.forEach((r,n)=>{r.lastUsed<e&&(e=r.lastUsed,t=n);}),t&&this.cache.delete(t);}}invalidate(e){return m(this,null,function*(){let t=e.getKey();if(this.invalidations.get(t))return yield this.invalidations.get(t);this.cache.delete(e.getKey());let r=new Promise((n,s)=>{this.getHeader(e).then(o=>{n(),this.invalidations.delete(t);}).catch(o=>{s(o);});});this.invalidations.set(t,r);})}};l(M,"SharedPromiseCache");var P=M,B=class B{constructor(e,t,r){typeof e=="string"?this.source=new C(e):this.source=e,r?this.decompress=r:this.decompress=D,t?this.cache=t:this.cache=new P;}getHeader(){return m(this,null,function*(){return yield this.cache.getHeader(this.source)})}getZxyAttempt(e,t,r,n){return m(this,null,function*(){let s=G(e,t,r),o=yield this.cache.getHeader(this.source);if(e<o.minZoom||e>o.maxZoom)return;let a=o.rootDirectoryOffset,u=o.rootDirectoryLength;for(let c=0;c<=3;c++){let d=yield this.cache.getDirectory(this.source,a,u,o),h=Q(d,s);if(h){if(h.runLength>0){let g=yield this.source.getBytes(o.tileDataOffset+h.offset,h.length,n,o.etag);return {data:yield this.decompress(g.data,o.tileCompression),cacheControl:g.cacheControl,expires:g.expires}}a=o.leafDirectoryOffset+h.offset,u=h.length;}else return}throw new Error("Maximum directory depth exceeded")})}getZxy(e,t,r,n){return m(this,null,function*(){try{return yield this.getZxyAttempt(e,t,r,n)}catch(s){if(s instanceof E)return this.cache.invalidate(this.source),yield this.getZxyAttempt(e,t,r,n);throw s}})}getMetadataAttempt(){return m(this,null,function*(){let e=yield this.cache.getHeader(this.source),t=yield this.source.getBytes(e.jsonMetadataOffset,e.jsonMetadataLength,void 0,e.etag),r=yield this.decompress(t.data,e.internalCompression),n=new TextDecoder("utf-8");return JSON.parse(n.decode(r))})}getMetadata(){return m(this,null,function*(){try{return yield this.getMetadataAttempt()}catch(e){if(e instanceof E)return this.cache.invalidate(this.source),yield this.getMetadataAttempt();throw e}})}getTileJson(e){return m(this,null,function*(){let t=yield this.getHeader(),r=yield this.getMetadata(),n=_(t.tileType);return {tilejson:"3.0.0",scheme:"xyz",tiles:[`${e}/{z}/{x}/{y}${n}`],vector_layers:r.vector_layers,attribution:r.attribution,description:r.description,name:r.name,version:r.version,bounds:[t.minLon,t.minLat,t.maxLon,t.maxLat],center:[t.centerLon,t.centerLat,t.centerZoom],minzoom:t.minZoom,maxzoom:t.maxZoom}})}};l(B,"PMTiles");var x=B;
+var z=Object.defineProperty;var b=Math.pow;var l=(i,e)=>z(i,"name",{value:e,configurable:true});var m=(i,e,t)=>new Promise((r,n)=>{var s=u=>{try{a(t.next(u));}catch(c){n(c);}},o=u=>{try{a(t.throw(u));}catch(c){n(c);}},a=u=>u.done?r(u.value):Promise.resolve(u.value).then(s,o);a((t=t.apply(i,e)).next());});l((i,e)=>{let t=false,r="",n=L.GridLayer.extend({createTile:l((s,o)=>{let a=document.createElement("img"),u=new AbortController,c=u.signal;return a.cancel=()=>{u.abort();},t||(i.getHeader().then(d=>{d.tileType===1?console.error("Error: archive contains MVT vector tiles, but leafletRasterLayer is for displaying raster tiles. See https://github.com/protomaps/PMTiles/tree/main/js for details."):d.tileType===2?r="image/png":d.tileType===3?r="image/jpeg":d.tileType===4?r="image/webp":d.tileType===5&&(r="image/avif");}),t=true),i.getZxy(s.z,s.x,s.y,c).then(d=>{if(d){let h=new Blob([d.data],{type:r}),p=window.URL.createObjectURL(h);a.src=p,a.cancel=void 0,o(void 0,a);}}).catch(d=>{if(d.name!=="AbortError")throw d}),a},"createTile"),_removeTile:l(function(s){let o=this._tiles[s];o&&(o.el.cancel&&o.el.cancel(),o.el.width=0,o.el.height=0,o.el.deleted=true,L.DomUtil.remove(o.el),delete this._tiles[s],this.fire("tileunload",{tile:o.el,coords:this._keyToTileCoords(s)}));},"_removeTile")});return new n(e)},"leafletRasterLayer");var j=l(i=>(e,t)=>{if(t instanceof AbortController)return i(e,t);let r=new AbortController;return i(e,r).then(n=>t(void 0,n.data,n.cacheControl||"",n.expires||""),n=>t(n)).catch(n=>t(n)),{cancel:l(()=>r.abort(),"cancel")}},"v3compat"),T=class T{constructor(e){this.tilev4=l((e,t)=>m(this,null,function*(){if(e.type==="json"){let p=e.url.substr(10),y=this.tiles.get(p);if(y||(y=new x(p),this.tiles.set(p,y)),this.metadata)return {data:yield y.getTileJson(e.url)};let f=yield y.getHeader();return (f.minLon>=f.maxLon||f.minLat>=f.maxLat)&&console.error(`Bounds of PMTiles archive ${f.minLon},${f.minLat},${f.maxLon},${f.maxLat} are not valid.`),{data:{tiles:[`${e.url}/{z}/{x}/{y}`],minzoom:f.minZoom,maxzoom:f.maxZoom,bounds:[f.minLon,f.minLat,f.maxLon,f.maxLat]}}}let r=new RegExp(/pmtiles:\/\/(.+)\/(\d+)\/(\d+)\/(\d+)/),n=e.url.match(r);if(!n)throw new Error("Invalid PMTiles protocol URL");let s=n[1],o=this.tiles.get(s);o||(o=new x(s),this.tiles.set(s,o));let a=n[2],u=n[3],c=n[4],d=yield o.getHeader(),h=yield o==null?void 0:o.getZxy(+a,+u,+c,t.signal);if(h)return {data:new Uint8Array(h.data),cacheControl:h.cacheControl,expires:h.expires};if(d.tileType===1){if(this.errorOnMissingTile)throw new Error("Tile not found.");return {data:new Uint8Array}}return {data:null}}),"tilev4");this.tile=j(this.tilev4);this.tiles=new Map,this.metadata=(e==null?void 0:e.metadata)||false,this.errorOnMissingTile=(e==null?void 0:e.errorOnMissingTile)||false;}add(e){this.tiles.set(e.source.getKey(),e);}get(e){return this.tiles.get(e)}};l(T,"Protocol");function w(i,e){return (e>>>0)*4294967296+(i>>>0)}l(w,"toNum");function F(i,e){let t=e.buf,r=t[e.pos++],n=(r&112)>>4;if(r<128||(r=t[e.pos++],n|=(r&127)<<3,r<128)||(r=t[e.pos++],n|=(r&127)<<10,r<128)||(r=t[e.pos++],n|=(r&127)<<17,r<128)||(r=t[e.pos++],n|=(r&127)<<24,r<128)||(r=t[e.pos++],n|=(r&1)<<31,r<128))return w(i,n);throw new Error("Expected varint not more than 10 bytes")}l(F,"readVarintRemainder");function v(i){let e=i.buf,t=e[i.pos++],r=t&127;return t<128||(t=e[i.pos++],r|=(t&127)<<7,t<128)||(t=e[i.pos++],r|=(t&127)<<14,t<128)||(t=e[i.pos++],r|=(t&127)<<21,t<128)?r:(t=e[i.pos],r|=(t&15)<<28,F(r,i))}l(v,"readVarint");function k(i,e,t,r){if(r===0){t===1&&(e[0]=i-1-e[0],e[1]=i-1-e[1]);let n=e[0];e[0]=e[1],e[1]=n;}}l(k,"rotate");function N(i,e){let t=b(2,i),r=e,n=e,s=e,o=[0,0],a=1;for(;a<t;)r=1&s/2,n=1&(s^r),k(a,o,r,n),o[0]+=a*r,o[1]+=a*n,s=s/4,a*=2;return [i,o[0],o[1]]}l(N,"idOnLevel");var q=[0,1,5,21,85,341,1365,5461,21845,87381,349525,1398101,5592405,22369621,89478485,357913941,1431655765,5726623061,22906492245,91625968981,366503875925,1466015503701,5864062014805,23456248059221,93824992236885,375299968947541,0x5555555555555];function G(i,e,t){if(i>26)throw new Error("Tile zoom level exceeds max safe number limit (26)");if(e>b(2,i)-1||t>b(2,i)-1)throw new Error("tile x/y outside zoom level bounds");let r=q[i],n=b(2,i),s=0,o=0,a=0,u=[e,t],c=n/2;for(;c>0;)s=(u[0]&c)>0?1:0,o=(u[1]&c)>0?1:0,a+=c*c*(3*s^o),k(c,u,s,o),c=c/2;return r+a}l(G,"zxyToTileId");function ie(i){let e=0;for(let r=0;r<27;r++){let n=(1<<r)*(1<<r);if(e+n>i)return N(r,i-e);e+=n;}throw new Error("Tile zoom level exceeds max safe number limit (26)")}l(ie,"tileIdToZxy");var J=(s=>(s[s.Unknown=0]="Unknown",s[s.None=1]="None",s[s.Gzip=2]="Gzip",s[s.Brotli=3]="Brotli",s[s.Zstd=4]="Zstd",s))(J||{});function D(i,e){return m(this,null,function*(){if(e===1||e===0)return i;if(e===2){if(typeof globalThis.DecompressionStream=="undefined")return decompressSync(new Uint8Array(i));let t=new Response(i).body;if(!t)throw new Error("Failed to read response stream");let r=t.pipeThrough(new globalThis.DecompressionStream("gzip"));return new Response(r).arrayBuffer()}throw new Error("Compression method not supported")})}l(D,"defaultDecompress");var O=(o=>(o[o.Unknown=0]="Unknown",o[o.Mvt=1]="Mvt",o[o.Png=2]="Png",o[o.Jpeg=3]="Jpeg",o[o.Webp=4]="Webp",o[o.Avif=5]="Avif",o))(O||{});function _(i){return i===1?".mvt":i===2?".png":i===3?".jpg":i===4?".webp":i===5?".avif":""}l(_,"tileTypeExt");var Y=127;function Q(i,e){let t=0,r=i.length-1;for(;t<=r;){let n=r+t>>1,s=e-i[n].tileId;if(s>0)t=n+1;else if(s<0)r=n-1;else return i[n]}return r>=0&&(i[r].runLength===0||e-i[r].tileId<i[r].runLength)?i[r]:null}l(Q,"findTile");var A=class A{constructor(e){this.file=e;}getKey(){return this.file.name}getBytes(e,t){return m(this,null,function*(){return {data:yield this.file.slice(e,e+t).arrayBuffer()}})}};l(A,"FileSource");var U=class U{constructor(e,t=new Headers){this.url=e,this.customHeaders=t,this.mustReload=false;let r="";"navigator"in globalThis&&(r=globalThis.navigator.userAgent||"");let n=r.indexOf("Windows")>-1,s=/Chrome|Chromium|Edg|OPR|Brave/.test(r);this.chromeWindowsNoCache=false,n&&s&&(this.chromeWindowsNoCache=true);}getKey(){return this.url}setHeaders(e){this.customHeaders=e;}getBytes(e,t,r,n){return m(this,null,function*(){let s,o;r?o=r:(s=new AbortController,o=s.signal);let a=new Headers(this.customHeaders);a.set("range",`bytes=${e}-${e+t-1}`);let u;this.mustReload?u="reload":this.chromeWindowsNoCache&&(u="no-store");let c=yield fetch(this.url,{signal:o,cache:u,headers:a});if(e===0&&c.status===416){let y=c.headers.get("Content-Range");if(!y||!y.startsWith("bytes */"))throw new Error("Missing content-length on 416 response");let f=+y.substr(8);c=yield fetch(this.url,{signal:o,cache:"reload",headers:{range:`bytes=0-${f-1}`}});}let d=c.headers.get("Etag");if(d!=null&&d.startsWith("W/")&&(d=null),c.status===416||n&&d&&d!==n)throw this.mustReload=true,new E(`Server returned non-matching ETag ${n} after one retry. Check browser extensions and servers for issues that may affect correct ETag headers.`);if(c.status>=300)throw new Error(`Bad response code: ${c.status}`);let h=c.headers.get("Content-Length");if(c.status===200&&(!h||+h>t))throw s&&s.abort(),new Error("Server returned no content-length header or content-length exceeding request. Check that your storage backend supports HTTP Byte Serving.");return {data:yield c.arrayBuffer(),etag:d||void 0,cacheControl:c.headers.get("Cache-Control")||void 0,expires:c.headers.get("Expires")||void 0}})}};l(U,"FetchSource");var C=U;function g(i,e){let t=i.getUint32(e+4,true),r=i.getUint32(e+0,true);return t*b(2,32)+r}l(g,"getUint64");function X(i,e){let t=new DataView(i),r=t.getUint8(7);if(r>3)throw new Error(`Archive is spec version ${r} but this library supports up to spec version 3`);return {specVersion:r,rootDirectoryOffset:g(t,8),rootDirectoryLength:g(t,16),jsonMetadataOffset:g(t,24),jsonMetadataLength:g(t,32),leafDirectoryOffset:g(t,40),leafDirectoryLength:g(t,48),tileDataOffset:g(t,56),tileDataLength:g(t,64),numAddressedTiles:g(t,72),numTileEntries:g(t,80),numTileContents:g(t,88),clustered:t.getUint8(96)===1,internalCompression:t.getUint8(97),tileCompression:t.getUint8(98),tileType:t.getUint8(99),minZoom:t.getUint8(100),maxZoom:t.getUint8(101),minLon:t.getInt32(102,true)/1e7,minLat:t.getInt32(106,true)/1e7,maxLon:t.getInt32(110,true)/1e7,maxLat:t.getInt32(114,true)/1e7,centerZoom:t.getUint8(118),centerLon:t.getInt32(119,true)/1e7,centerLat:t.getInt32(123,true)/1e7,etag:e}}l(X,"bytesToHeader");function Z(i){let e={buf:new Uint8Array(i),pos:0},t=v(e),r=[],n=0;for(let s=0;s<t;s++){let o=v(e);r.push({tileId:n+o,offset:0,length:0,runLength:1}),n+=o;}for(let s=0;s<t;s++)r[s].runLength=v(e);for(let s=0;s<t;s++)r[s].length=v(e);for(let s=0;s<t;s++){let o=v(e);o===0&&s>0?r[s].offset=r[s-1].offset+r[s-1].length:r[s].offset=o-1;}return r}l(Z,"deserializeIndex");var R=class R extends Error{};l(R,"EtagMismatch");var E=R;function K(i,e){return m(this,null,function*(){let t=yield i.getBytes(0,16384);if(new DataView(t.data).getUint16(0,true)!==19792)throw new Error("Wrong magic number for PMTiles archive");let n=t.data.slice(0,Y),s=X(n,t.etag),o=t.data.slice(s.rootDirectoryOffset,s.rootDirectoryOffset+s.rootDirectoryLength),a=`${i.getKey()}|${s.etag||""}|${s.rootDirectoryOffset}|${s.rootDirectoryLength}`,u=Z(yield e(o,s.internalCompression));return [s,[a,u.length,u]]})}l(K,"getHeaderAndRoot");function I(i,e,t,r,n){return m(this,null,function*(){let s=yield i.getBytes(t,r,void 0,n.etag),o=yield e(s.data,n.internalCompression),a=Z(o);if(a.length===0)throw new Error("Empty directory is invalid");return a})}l(I,"getDirectory");var H=class H{constructor(e=100,t=true,r=D){this.cache=new Map,this.maxCacheEntries=e,this.counter=1,this.decompress=r;}getHeader(e){return m(this,null,function*(){let t=e.getKey(),r=this.cache.get(t);if(r)return r.lastUsed=this.counter++,r.data;let n=yield K(e,this.decompress);return n[1]&&this.cache.set(n[1][0],{lastUsed:this.counter++,data:n[1][2]}),this.cache.set(t,{lastUsed:this.counter++,data:n[0]}),this.prune(),n[0]})}getDirectory(e,t,r,n){return m(this,null,function*(){let s=`${e.getKey()}|${n.etag||""}|${t}|${r}`,o=this.cache.get(s);if(o)return o.lastUsed=this.counter++,o.data;let a=yield I(e,this.decompress,t,r,n);return this.cache.set(s,{lastUsed:this.counter++,data:a}),this.prune(),a})}prune(){if(this.cache.size>this.maxCacheEntries){let e=1/0,t;this.cache.forEach((r,n)=>{r.lastUsed<e&&(e=r.lastUsed,t=n);}),t&&this.cache.delete(t);}}invalidate(e){return m(this,null,function*(){this.cache.delete(e.getKey());})}};l(H,"ResolvedValueCache");var M=class M{constructor(e=100,t=true,r=D){this.cache=new Map,this.invalidations=new Map,this.maxCacheEntries=e,this.counter=1,this.decompress=r;}getHeader(e){return m(this,null,function*(){let t=e.getKey(),r=this.cache.get(t);if(r)return r.lastUsed=this.counter++,yield r.data;let n=new Promise((s,o)=>{K(e,this.decompress).then(a=>{a[1]&&this.cache.set(a[1][0],{lastUsed:this.counter++,data:Promise.resolve(a[1][2])}),s(a[0]),this.prune();}).catch(a=>{o(a);});});return this.cache.set(t,{lastUsed:this.counter++,data:n}),n})}getDirectory(e,t,r,n){return m(this,null,function*(){let s=`${e.getKey()}|${n.etag||""}|${t}|${r}`,o=this.cache.get(s);if(o)return o.lastUsed=this.counter++,yield o.data;let a=new Promise((u,c)=>{I(e,this.decompress,t,r,n).then(d=>{u(d),this.prune();}).catch(d=>{c(d);});});return this.cache.set(s,{lastUsed:this.counter++,data:a}),a})}prune(){if(this.cache.size>=this.maxCacheEntries){let e=1/0,t;this.cache.forEach((r,n)=>{r.lastUsed<e&&(e=r.lastUsed,t=n);}),t&&this.cache.delete(t);}}invalidate(e){return m(this,null,function*(){let t=e.getKey();if(this.invalidations.get(t))return yield this.invalidations.get(t);this.cache.delete(e.getKey());let r=new Promise((n,s)=>{this.getHeader(e).then(o=>{n(),this.invalidations.delete(t);}).catch(o=>{s(o);});});this.invalidations.set(t,r);})}};l(M,"SharedPromiseCache");var P=M,B=class B{constructor(e,t,r){typeof e=="string"?this.source=new C(e):this.source=e,r?this.decompress=r:this.decompress=D,t?this.cache=t:this.cache=new P;}getHeader(){return m(this,null,function*(){return yield this.cache.getHeader(this.source)})}getZxyAttempt(e,t,r,n){return m(this,null,function*(){let s=G(e,t,r),o=yield this.cache.getHeader(this.source);if(e<o.minZoom||e>o.maxZoom)return;let a=o.rootDirectoryOffset,u=o.rootDirectoryLength;for(let c=0;c<=3;c++){let d=yield this.cache.getDirectory(this.source,a,u,o),h=Q(d,s);if(h){if(h.runLength>0){let p=yield this.source.getBytes(o.tileDataOffset+h.offset,h.length,n,o.etag);return {data:yield this.decompress(p.data,o.tileCompression),cacheControl:p.cacheControl,expires:p.expires}}a=o.leafDirectoryOffset+h.offset,u=h.length;}else return}throw new Error("Maximum directory depth exceeded")})}getZxy(e,t,r,n){return m(this,null,function*(){try{return yield this.getZxyAttempt(e,t,r,n)}catch(s){if(s instanceof E)return this.cache.invalidate(this.source),yield this.getZxyAttempt(e,t,r,n);throw s}})}getMetadataAttempt(){return m(this,null,function*(){let e=yield this.cache.getHeader(this.source),t=yield this.source.getBytes(e.jsonMetadataOffset,e.jsonMetadataLength,void 0,e.etag),r=yield this.decompress(t.data,e.internalCompression),n=new TextDecoder("utf-8");return JSON.parse(n.decode(r))})}getMetadata(){return m(this,null,function*(){try{return yield this.getMetadataAttempt()}catch(e){if(e instanceof E)return this.cache.invalidate(this.source),yield this.getMetadataAttempt();throw e}})}getTileJson(e){return m(this,null,function*(){let t=yield this.getHeader(),r=yield this.getMetadata(),n=_(t.tileType);return {tilejson:"3.0.0",scheme:"xyz",tiles:[`${e}/{z}/{x}/{y}${n}`],vector_layers:r.vector_layers,attribution:r.attribution,description:r.description,name:r.name,version:r.version,bounds:[t.minLon,t.minLat,t.maxLon,t.maxLat],center:[t.centerLon,t.centerLat,t.centerZoom],minzoom:t.minZoom,maxzoom:t.maxZoom}})}};l(B,"PMTiles");var x=B;
+
+/**
+ * This module provides utilities for working with PMTiles in a web environment.
+ */
+/**
+ * Opens a PMTiles resource using a URL.
+ * @param {string} FilePath - The URL of the PMTiles resource.
+ * @returns {PMTiles} A PMTiles object.
+ */
+function openPMtiles(FilePath) {
+    const source = new C(FilePath);
+    const pmtiles = new x(source);
+    return pmtiles;
+}
+/**
+ * Retrieves a tile from a PMTiles archive by its ZXY coordinates.
+ * @param {PMTiles} pmtiles - The PMTiles object to query.
+ * @param {number} z - The zoom level of the tile.
+ * @param {number} x - The X coordinate of the tile.
+ * @param {number} y - The Y coordinate of the tile.
+ * @returns {Promise<{ data: ArrayBuffer | undefined }>} A Promise that resolves with the tile data as an ArrayBuffer, or undefined if the tile is not found.
+ */
+function getPMtilesTile(pmtiles, z, x, y) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const zxyTile = yield pmtiles.getZxy(z, x, y);
+            if (zxyTile && zxyTile.data) {
+                return { data: zxyTile.data };
+            }
+            else {
+                return { data: undefined };
+            }
+        }
+        catch (error) {
+            console.error("Error fetching tile:", error);
+            return { data: undefined };
+        }
+    });
+}
+/**
+ * Placeholder function for processing image data when built for the web.
+ * This function does not perform any processing and always returns undefined.
+ * @param {Blob} _blob - The image data as a Blob (not used).
+ * @param {Encoding} _encoding - The encoding (not used).
+ * @param {AbortController} _abortController - The abort controller (not used).
+ * @returns {Promise<undefined>} A Promise that always resolves with undefined.
+ */
+function GetImageData(_blob, _encoding, _abortController) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return undefined;
+    });
+}
+
+let offscreenCanvas;
+let offscreenContext;
+let canvas;
+let canvasContext;
+function decodeImageNode(blob, encoding, abortController) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const img = yield GetImageData();
+        if (isAborted(abortController))
+            return null;
+        return img;
+    });
+}
+/**
+ * Parses a `raster-dem` image into a DemTile using Webcoded VideoFrame API.
+ */
+function decodeImageModern(blob, encoding, abortController) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const img = yield createImageBitmap(blob);
+        if (isAborted(abortController))
+            return null;
+        return decodeImageUsingOffscreenCanvas(img, encoding);
+    });
+}
+function decodeImageUsingOffscreenCanvas(img, encoding) {
+    if (!offscreenCanvas) {
+        offscreenCanvas = new OffscreenCanvas(img.width, img.height);
+        offscreenContext = offscreenCanvas.getContext("2d", {
+            willReadFrequently: true,
+        });
+    }
+    return getElevations(img, encoding, offscreenCanvas, offscreenContext);
+}
+/**
+ * Parses a `raster-dem` image into a DemTile using webcodec VideoFrame API which works
+ * even when browsers disable/degrade the canvas getImageData API as a privacy protection.
+ */
+function decodeImageVideoFrame(blob, encoding, abortController) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c;
+        const img = yield createImageBitmap(blob);
+        if (isAborted(abortController))
+            return null;
+        const vf = new VideoFrame(img, { timestamp: 0 });
+        try {
+            // formats we can handle: BGRX, BGRA, RGBA, RGBX
+            const valid = ((_a = vf === null || vf === void 0 ? void 0 : vf.format) === null || _a === void 0 ? void 0 : _a.startsWith("BGR")) || ((_b = vf === null || vf === void 0 ? void 0 : vf.format) === null || _b === void 0 ? void 0 : _b.startsWith("RGB"));
+            if (!valid) {
+                throw new Error(`Unrecognized format: ${vf === null || vf === void 0 ? void 0 : vf.format}`);
+            }
+            const swapBR = (_c = vf === null || vf === void 0 ? void 0 : vf.format) === null || _c === void 0 ? void 0 : _c.startsWith("BGR");
+            const size = vf.allocationSize();
+            const data = new Uint8ClampedArray(size);
+            yield vf.copyTo(data);
+            if (swapBR) {
+                for (let i = 0; i < data.length; i += 4) {
+                    const tmp = data[i];
+                    data[i] = data[i + 2];
+                    data[i + 2] = tmp;
+                }
+            }
+            return decodeParsedImage(img.width, img.height, encoding, data);
+        }
+        catch (_) {
+            if (isAborted(abortController))
+                return null;
+            // fall back to offscreen canvas
+            return decodeImageUsingOffscreenCanvas(img, encoding);
+        }
+        finally {
+            vf.close();
+        }
+    });
+}
+/**
+ * Parses a `raster-dem` image into a DemTile using `<img>` element drawn to a `<canvas>`.
+ * Only works on the main thread, but works across all browsers.
+ */
+function decodeImageOld(blob, encoding, abortController) {
+    return __awaiter(this, void 0, void 0, function* () {
+        if (!canvas) {
+            canvas = document.createElement("canvas");
+            canvasContext = canvas.getContext("2d", {
+                willReadFrequently: true,
+            });
+        }
+        const img = new Image();
+        onAbort(abortController, () => (img.src = ""));
+        const fetchedImage = yield new Promise((resolve, reject) => {
+            img.onload = () => {
+                if (!isAborted(abortController))
+                    resolve(img);
+                URL.revokeObjectURL(img.src);
+                img.onload = null;
+            };
+            img.onerror = () => reject(new Error("Could not load image."));
+            img.src = blob.size ? URL.createObjectURL(blob) : "";
+        });
+        return getElevations(fetchedImage, encoding, canvas, canvasContext);
+    });
+}
+/**
+ * Parses a `raster-dem` image in a worker that doesn't support OffscreenCanvas and createImageBitmap
+ * by running decodeImageOld on the main thread and returning the result.
+ */
+function decodeImageOnMainThread(blob, encoding, abortController) {
+    return self.actor.send("decodeImage", [], abortController, undefined, blob, encoding);
+}
+function isWorker() {
+    return (
+    // @ts-expect-error WorkerGlobalScope defined
+    typeof WorkerGlobalScope !== "undefined" &&
+        typeof self !== "undefined" &&
+        // @ts-expect-error WorkerGlobalScope defined
+        self instanceof WorkerGlobalScope);
+}
+const defaultDecoder = shouldUseVideoFrame()
+    ? decodeImageVideoFrame
+    : offscreenCanvasSupported()
+        ? decodeImageModern
+        : isWorker()
+            ? decodeImageOnMainThread
+            : typeof document !== "undefined"
+                ? decodeImageOld
+                : decodeImageNode;
+function getElevations(img, encoding, canvas, canvasContext) {
+    canvas.width = img.width;
+    canvas.height = img.height;
+    if (!canvasContext)
+        throw new Error("failed to get context");
+    canvasContext.drawImage(img, 0, 0, img.width, img.height);
+    const rgba = canvasContext.getImageData(0, 0, img.width, img.height).data;
+    return decodeParsedImage(img.width, img.height, encoding, rgba);
+}
+function decodeParsedImage(width, height, encoding, input) {
+    const decoder = encoding === "mapbox"
+        ? (r, g, b) => -1e4 + (r * 256 * 256 + g * 256 + b) * 0.1
+        : (r, g, b) => r * 256 + g + b / 256 - 32768;
+    const data = new Float32Array(width * height);
+    for (let i = 0; i < input.length; i += 4) {
+        data[i / 4] = decoder(input[i], input[i + 1], input[i + 2]);
+    }
+    return { width, height, data };
+}
+
+const MIN_VALID_M = -12e3;
+const MAX_VALID_M = 9000;
+function defaultIsValid(number) {
+    return !isNaN(number) && number >= MIN_VALID_M && number <= MAX_VALID_M;
+}
+/** A tile containing elevation values aligned to a grid. */
+class HeightTile {
+    constructor(width, height, get) {
+        /**
+         * Splits this tile into a `1<<subz` x `1<<subz` grid and returns the tile at coordinates `subx, suby`.
+         */
+        this.split = (subz, subx, suby) => {
+            if (subz === 0)
+                return this;
+            const by = 1 << subz;
+            const dx = (subx * this.width) / by;
+            const dy = (suby * this.height) / by;
+            return new HeightTile(this.width / by, this.height / by, (x, y) => this.get(x + dx, y + dy));
+        };
+        /**
+         * Returns a new tile scaled up by `factor` with pixel values that are subsampled using
+         * bilinear interpolation between the original height tile values.
+         *
+         * The original and result tile are assumed to represent values taken at the center of each pixel.
+         */
+        this.subsamplePixelCenters = (factor) => {
+            const lerp = (a, b, f) => isNaN(a) ? b : isNaN(b) ? a : a + (b - a) * f;
+            if (factor <= 1)
+                return this;
+            const sub = 0.5 - 1 / (2 * factor);
+            const blerper = (x, y) => {
+                const dx = x / factor - sub;
+                const dy = y / factor - sub;
+                const ox = Math.floor(dx);
+                const oy = Math.floor(dy);
+                const a = this.get(ox, oy);
+                const b = this.get(ox + 1, oy);
+                const c = this.get(ox, oy + 1);
+                const d = this.get(ox + 1, oy + 1);
+                const fx = dx - ox;
+                const fy = dy - oy;
+                const top = lerp(a, b, fx);
+                const bottom = lerp(c, d, fx);
+                return lerp(top, bottom, fy);
+            };
+            return new HeightTile(this.width * factor, this.height * factor, blerper);
+        };
+        /**
+         * Assumes the input tile represented measurements taken at the center of each pixel, and
+         * returns a new tile where values are the height at the top-left of each pixel by averaging
+         * the 4 adjacent pixel values.
+         */
+        this.averagePixelCentersToGrid = (radius = 1) => new HeightTile(this.width + 1, this.height + 1, (x, y) => {
+            let sum = 0, count = 0, v = 0;
+            for (let newX = x - radius; newX < x + radius; newX++) {
+                for (let newY = y - radius; newY < y + radius; newY++) {
+                    if (!isNaN((v = this.get(newX, newY)))) {
+                        count++;
+                        sum += v;
+                    }
+                }
+            }
+            return count === 0 ? NaN : sum / count;
+        });
+        /** Returns a new tile with elevation values scaled by `multiplier`. */
+        this.scaleElevation = (multiplier) => multiplier === 1
+            ? this
+            : new HeightTile(this.width, this.height, (x, y) => this.get(x, y) * multiplier);
+        /**
+         * Precompute every value from `-bufer, -buffer` to `width + buffer, height + buffer` and serve them
+         * out of a `Float32Array`. Until this method is called, all `get` requests are lazy and call all previous
+         * methods in the chain up to the root DEM tile.
+         */
+        this.materialize = (buffer = 2) => {
+            const stride = this.width + 2 * buffer;
+            const data = new Float32Array(stride * (this.height + 2 * buffer));
+            let idx = 0;
+            for (let y = -buffer; y < this.height + buffer; y++) {
+                for (let x = -buffer; x < this.width + buffer; x++) {
+                    data[idx++] = this.get(x, y);
+                }
+            }
+            return new HeightTile(this.width, this.height, (x, y) => data[(y + buffer) * stride + x + buffer]);
+        };
+        this.get = get;
+        this.width = width;
+        this.height = height;
+    }
+    /** Construct a height tile from raw DEM pixel values */
+    static fromRawDem(demTile) {
+        return new HeightTile(demTile.width, demTile.height, (x, y) => {
+            const value = demTile.data[y * demTile.width + x];
+            return defaultIsValid(value) ? value : NaN;
+        });
+    }
+    /**
+     * Construct a height tile from a DEM tile plus it's 8 neighbors, so that
+     * you can request `x` or `y` outside the bounds of the original tile.
+     *
+     * @param neighbors An array containing tiles: `[nw, n, ne, w, c, e, sw, s, se]`
+     */
+    static combineNeighbors(neighbors) {
+        if (neighbors.length !== 9) {
+            throw new Error("Must include a tile plus 8 neighbors");
+        }
+        const mainTile = neighbors[4];
+        if (!mainTile) {
+            return undefined;
+        }
+        const width = mainTile.width;
+        const height = mainTile.height;
+        return new HeightTile(width, height, (x, y) => {
+            let gridIdx = 0;
+            if (y < 0) {
+                y += height;
+            }
+            else if (y < height) {
+                gridIdx += 3;
+            }
+            else {
+                y -= height;
+                gridIdx += 6;
+            }
+            if (x < 0) {
+                x += width;
+            }
+            else if (x < width) {
+                gridIdx += 1;
+            }
+            else {
+                x -= width;
+                gridIdx += 2;
+            }
+            const grid = neighbors[gridIdx];
+            return grid ? grid.get(x, y) : NaN;
+        });
+    }
+}
 
 const SHIFT_LEFT_32 = (1 << 16) * (1 << 16);
 const SHIFT_RIGHT_32 = 1 / SHIFT_LEFT_32;
@@ -1869,7 +1933,7 @@ function writeBigVarint(val, pbf) {
         }
     }
 
-    if (val >= 0x10000000000000000 || val < -0x10000000000000000) {
+    if (val >= 0x10000000000000000 || val < -18446744073709552e3) {
         throw new Error('Given varint doesn\'t fit into 10 bytes');
     }
 
@@ -2418,7 +2482,7 @@ const defaultPMtilesGetTile = (z, x, y, _demUrlPattern, parentAbortController, p
         throw new Error("Request aborted by parent.");
     }
     try {
-        const zxyTile = yield pmtiles.getZxy(z, x, y);
+        const zxyTile = yield getPMtilesTile(pmtiles, z, x, y);
         if (zxyTile && zxyTile.data) {
             const blob = new Blob([zxyTile.data]);
             return {
@@ -2440,8 +2504,8 @@ const defaultPMtilesGetTile = (z, x, y, _demUrlPattern, parentAbortController, p
  */
 class LocalDemManager {
     constructor(options) {
-        this.loaded = Promise.resolve();
         this.pmtiles = null;
+        this.loaded = Promise.resolve();
         this.fetchAndParseTile = (z, x, y, abortController, timer) => {
             // eslint-disable-next-line @typescript-eslint/no-this-alias
             const self = this;
@@ -2468,8 +2532,7 @@ class LocalDemManager {
         this.decodeImage = options.decodeImage || defaultDecoder;
         if (this.demUrlPattern.startsWith("pmtiles://")) {
             try {
-                const source = new C(this.demUrlPattern.replace("pmtiles://", ""));
-                this.pmtiles = new x(source);
+                this.pmtiles = openPMtiles(this.demUrlPattern.replace("pmtiles://", ""));
             }
             catch (e) {
                 console.warn("Could not open pmtiles", e);
@@ -2653,8 +2716,8 @@ exports.L = LocalDemManager;
 exports.T = Timer;
 exports._ = __awaiter;
 exports.a = decodeOptions;
-exports.b = generateIsolines;
-exports.c = decodeParsedImage;
+exports.b = decodeParsedImage;
+exports.c = generateIsolines;
 exports.d = defaultDecoder;
 exports.e = encodeOptions;
 exports.f = prepareContourTile;
@@ -2860,11 +2923,11 @@ class DemSource {
 }
 
 const exported = {
-    generateIsolines: actor.b,
+    generateIsolines: actor.c,
     DemSource,
     HeightTile: actor.H,
     LocalDemManager: actor.L,
-    decodeParsedImage: actor.c,
+    decodeParsedImage: actor.b,
     set workerUrl(url) {
         CONFIG.workerUrl = url;
     },

@@ -3,6 +3,7 @@ import type { Timer } from "./performance";
 import type WorkerDispatch from "./worker-dispatch";
 import type { PMTiles } from "pmtiles";
 /** Scheme used to map pixel rgb values elevations. */
+export type Tile = [number, number, number];
 export type Encoding = "terrarium" | "mapbox";
 export interface IsTransferrable {
     transferrables: Transferable[];
@@ -71,6 +72,12 @@ export interface GlobalContourTileOptions extends ContourTileOptions {
 }
 export interface IndividualContourTileOptions extends ContourTileOptions {
     levels: number[];
+}
+export interface FlexibleContourTileOptions extends ContourTileOptions {
+    thresholds?: {
+        [n: number]: number | number[];
+    };
+    levels?: number[];
 }
 export interface Image {
     width: number;

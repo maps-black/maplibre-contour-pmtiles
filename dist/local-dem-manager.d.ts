@@ -1,8 +1,8 @@
 import AsyncCache from "./cache";
 import { HeightTile } from "./height-tile";
-import { PMTiles } from "pmtiles";
 import type { ContourTile, DecodeImageFunction, DemManager, DemManagerInitizlizationParameters, DemTile, Encoding, FetchResponse, GetTileFunction, IndividualContourTileOptions } from "./types";
 import { Timer } from "./performance";
+import type { PMTiles } from "pmtiles";
 /**
  * Caches, decodes, and processes raster tiles in the current thread.
  */
@@ -10,14 +10,14 @@ export declare class LocalDemManager implements DemManager {
     tileCache: AsyncCache<string, FetchResponse>;
     parsedCache: AsyncCache<string, DemTile>;
     contourCache: AsyncCache<string, ContourTile>;
-    demUrlPattern: string;
+    pmtiles: PMTiles | null;
     encoding: Encoding;
     maxzoom: number;
     timeoutMs: number;
     loaded: Promise<void>;
     decodeImage: DecodeImageFunction;
     getTile: GetTileFunction;
-    pmtiles: PMTiles | null;
+    demUrlPattern: string;
     constructor(options: DemManagerInitizlizationParameters);
     fetchTile(z: number, x: number, y: number, parentAbortController: AbortController, timer?: Timer): Promise<FetchResponse>;
     fetchAndParseTile: (z: number, x: number, y: number, abortController: AbortController, timer?: Timer) => Promise<DemTile>;

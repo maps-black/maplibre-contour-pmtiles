@@ -156,11 +156,11 @@ class DemSource {
 }
 
 const exported = {
-    generateIsolines: actor.b,
+    generateIsolines: actor.c,
     DemSource,
     HeightTile: actor.H,
     LocalDemManager: actor.L,
-    decodeParsedImage: actor.c,
+    decodeParsedImage: actor.b,
     set workerUrl(url) {
         CONFIG.workerUrl = url;
     },
